@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/shurcooL/graphql/internal/jsonutil"
 	"golang.org/x/net/context/ctxhttp"
@@ -34,18 +36,26 @@ func NewClient(url string, httpClient *http.Client) *Client {
 // with a query derived from q, populating the response into it.
 // q should be a pointer to struct that corresponds to the GraphQL schema.
 func (c *Client) Query(ctx context.Context, q interface{}, variables map[string]interface{}) error {
-	return c.do(ctx, queryOperation, q, variables)
+	return c.do(ctx, queryOperation, q, variables, false)
+}
+
+// Query executes a single GraphQL query request,
+// with a query derived from q, populating the response into it.
+// q should be a pointer to struct that corresponds to the GraphQL schema.
+// Retry on github secondary rate limit error
+func (c *Client) QueryRetry(ctx context.Context, q interface{}, variables map[string]interface{}) error {
+	return c.do(ctx, queryOperation, q, variables, true)
 }
 
 // Mutate executes a single GraphQL mutation request,
 // with a mutation derived from m, populating the response into it.
 // m should be a pointer to struct that corresponds to the GraphQL schema.
 func (c *Client) Mutate(ctx context.Context, m interface{}, variables map[string]interface{}) error {
-	return c.do(ctx, mutationOperation, m, variables)
+	return c.do(ctx, mutationOperation, m, variables, false)
 }
 
 // do executes a single GraphQL operation.
-func (c *Client) do(ctx context.Context, op operationType, v interface{}, variables map[string]interface{}) error {
+func (c *Client) do(ctx context.Context, op operationType, v interface{}, variables map[string]interface{}, retry bool) error {
 	var query string
 	switch op {
 	case queryOperation:
@@ -65,15 +75,35 @@ func (c *Client) do(ctx context.Context, op operationType, v interface{}, variab
 	if err != nil {
 		return err
 	}
-	resp, err := ctxhttp.Post(ctx, c.httpClient, c.url, "application/json", &buf)
-	if err != nil {
-		return err
+
+	var resp *http.Response
+	for {
+		resp, err = ctxhttp.Post(ctx, c.httpClient, c.url, "application/json", &buf)
+		if err != nil {
+			return err
+		}
+
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			if retry && resp.StatusCode == http.StatusForbidden {
+				retryAfter := resp.Header.Get("Retry-After")
+				// Secondary rate limit encountered. retrying
+				if retryAfter != "" {
+					timeout, err := strconv.Atoi(retryAfter)
+					if err == nil {
+						time.Sleep(time.Duration(timeout) * time.Second)
+						continue
+					}
+				}
+			}
+
+			body, _ := ioutil.ReadAll(resp.Body)
+			return fmt.Errorf("non-200 OK status code: %v body: %q", resp.Status, body)
+		}
+
+		break
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
-		return fmt.Errorf("non-200 OK status code: %v body: %q", resp.Status, body)
-	}
+
 	var out struct {
 		Data   *json.RawMessage
 		Errors errors
