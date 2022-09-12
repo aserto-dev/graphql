@@ -36,26 +36,26 @@ func NewClient(url string, httpClient *http.Client) *Client {
 // with a query derived from q, populating the response into it.
 // q should be a pointer to struct that corresponds to the GraphQL schema.
 func (c *Client) Query(ctx context.Context, q interface{}, variables map[string]interface{}) error {
-	return c.do(ctx, queryOperation, q, variables, false, 0)
+	return c.do(ctx, queryOperation, q, variables, 0, 1)
 }
 
 // Query executes a single GraphQL query request,
 // with a query derived from q, populating the response into it.
 // q should be a pointer to struct that corresponds to the GraphQL schema.
 // Retry on github secondary rate limit error
-func (c *Client) QueryRetry(ctx context.Context, q interface{}, variables map[string]interface{}, timeout int) error {
-	return c.do(ctx, queryOperation, q, variables, true, timeout)
+func (c *Client) QueryRetry(ctx context.Context, q interface{}, variables map[string]interface{}, timeout, tryCount int) error {
+	return c.do(ctx, queryOperation, q, variables, timeout, tryCount)
 }
 
 // Mutate executes a single GraphQL mutation request,
 // with a mutation derived from m, populating the response into it.
 // m should be a pointer to struct that corresponds to the GraphQL schema.
 func (c *Client) Mutate(ctx context.Context, m interface{}, variables map[string]interface{}) error {
-	return c.do(ctx, mutationOperation, m, variables, false, 0)
+	return c.do(ctx, mutationOperation, m, variables, 0, 1)
 }
 
 // do executes a single GraphQL operation.
-func (c *Client) do(ctx context.Context, op operationType, v interface{}, variables map[string]interface{}, retry bool, timeout int) error {
+func (c *Client) do(ctx context.Context, op operationType, v interface{}, variables map[string]interface{}, timeout, tryCount int) error {
 	var query string
 	switch op {
 	case queryOperation:
@@ -78,38 +78,35 @@ func (c *Client) do(ctx context.Context, op operationType, v interface{}, variab
 
 	var resp *http.Response
 
-	if retry {
-		for t := time.After(time.Duration(timeout) * time.Second); ; {
+	for r := 0; r < tryCount; r++ {
+		if timeout > 0 {
+			t := time.After(time.Duration(timeout) * time.Second)
 			select {
 			case <-t:
 				return fmt.Errorf("timed out retrying with secondary rate limit reached on %s", c.url)
 			default:
 			}
-
-			resp, err = ctxhttp.Post(ctx, c.httpClient, c.url, "application/json", &buf)
-			if err != nil {
-				return err
-			}
-
-			if resp.StatusCode == http.StatusForbidden {
-				retryAfter := resp.Header.Get("Retry-After")
-				// Secondary rate limit encountered. retrying
-				if retryAfter != "" {
-					timeout, err := strconv.Atoi(retryAfter)
-					if err != nil {
-						return err
-					}
-					time.Sleep(time.Duration(timeout) * time.Second)
-					continue
-				}
-			}
-			break
 		}
-	} else {
+
 		resp, err = ctxhttp.Post(ctx, c.httpClient, c.url, "application/json", &buf)
 		if err != nil {
 			return err
 		}
+
+		if resp.StatusCode == http.StatusForbidden {
+			retryAfter := resp.Header.Get("Retry-After")
+			// Secondary rate limit encountered. retrying
+			if retryAfter != "" {
+				timeout, err := strconv.Atoi(retryAfter)
+				if err != nil {
+					return err
+				}
+				time.Sleep(time.Duration(timeout) * time.Second)
+				continue
+
+			}
+		}
+		break
 	}
 
 	defer resp.Body.Close()
