@@ -43,19 +43,19 @@ func (c *Client) Query(ctx context.Context, q interface{}, variables map[string]
 // with a query derived from q, populating the response into it.
 // q should be a pointer to struct that corresponds to the GraphQL schema.
 // Retry on github secondary rate limit error
-func (c *Client) QueryRetry(ctx context.Context, q interface{}, variables map[string]interface{}, timeout, tryCount int) error {
-	return c.do(ctx, queryOperation, q, variables, timeout, tryCount)
+func (c *Client) QueryRetry(ctx context.Context, q interface{}, variables map[string]interface{}, timeout, retryCount int) error {
+	return c.do(ctx, queryOperation, q, variables, timeout, retryCount)
 }
 
 // Mutate executes a single GraphQL mutation request,
 // with a mutation derived from m, populating the response into it.
 // m should be a pointer to struct that corresponds to the GraphQL schema.
 func (c *Client) Mutate(ctx context.Context, m interface{}, variables map[string]interface{}) error {
-	return c.do(ctx, mutationOperation, m, variables, 0, 1)
+	return c.do(ctx, mutationOperation, m, variables, 0, 0)
 }
 
 // do executes a single GraphQL operation.
-func (c *Client) do(ctx context.Context, op operationType, v interface{}, variables map[string]interface{}, timeout, tryCount int) error {
+func (c *Client) do(ctx context.Context, op operationType, v interface{}, variables map[string]interface{}, timeout, retryCount int) error {
 	var query string
 	switch op {
 	case queryOperation:
@@ -78,7 +78,7 @@ func (c *Client) do(ctx context.Context, op operationType, v interface{}, variab
 
 	var resp *http.Response
 
-	for r := 0; r < tryCount; r++ {
+	for r := 0; r <= retryCount; r++ {
 		if timeout > 0 {
 			t := time.After(time.Duration(timeout) * time.Second)
 			select {
